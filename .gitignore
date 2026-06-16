@@ -1,0 +1,4 @@
+*.md
+.claude/
+.config/
+.DS_Store

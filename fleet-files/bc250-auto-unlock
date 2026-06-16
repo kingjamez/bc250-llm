@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+CULIVE=/opt/bc250/cu-live-manager.sh
+mapfile -t ADD < <(python3 - <<'PY'
+import ctypes, struct, os
+libdrm = ctypes.CDLL("libdrm_amdgpu.so.1")
+fd = os.open("/dev/dri/renderD128", os.O_RDWR)
+dev = ctypes.c_void_p(); a = ctypes.c_uint32(); b = ctypes.c_uint32()
+libdrm.amdgpu_device_initialize(fd, ctypes.byref(a), ctypes.byref(b), ctypes.byref(dev))
+buf = (ctypes.c_uint8 * 1024)()
+libdrm.amdgpu_query_info(dev, 0x16, 1024, ctypes.byref(buf))
+raw = bytes(buf)
+num_se = struct.unpack_from("<I", raw, 20)[0]
+num_sh = struct.unpack_from("<I", raw, 24)[0]
+for se in range(num_se):
+    for sh in range(num_sh):
+        bm = struct.unpack_from("<I", raw, 56 + (se*4 + sh)*4)[0]
+        on = [((bm >> (2*w)) & 0b11) != 0 for w in range(5)]
+        hi = max([w for w in range(5) if on[w]], default=-1)
+        for w in range(5):
+            if not on[w] and w > hi:
+                print(f"{se}.{sh}.{w}")
+PY
+)
+if [ "${#ADD[@]}" -gt 0 ]; then
+    echo "auto-unlock: enabling safe WGPs: ${ADD[*]}"
+    "$CULIVE" --yes enable-wgp "${ADD[@]}"
+else
+    echo "auto-unlock: die already at max-safe"
+fi
+"$CULIVE" --yes write-service-table
+"$CULIVE" --yes install-service
+"$CULIVE" status | grep "active & routed" || true

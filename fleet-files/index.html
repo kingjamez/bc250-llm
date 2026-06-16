@@ -1,0 +1,55 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Home Assistant</title>
+<style>
+:root{--bg:#0f1115;--panel:#1a1d24;--me:#2b6cb0;--bot:#262a33;--tx:#e8eaed;--mut:#8b93a1}
+*{box-sizing:border-box}body{margin:0;font:16px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--tx);height:100dvh;display:flex;flex-direction:column}
+header{padding:10px 14px;background:var(--panel);display:flex;gap:8px;align-items:center;border-bottom:1px solid #000}
+header b{font-size:17px;margin-right:auto}
+select{background:var(--bot);color:var(--tx);border:1px solid #3a3f4b;border-radius:8px;padding:7px 10px;font-size:15px}
+#rb{background:#7a2a2a;color:#fff;border:0;border-radius:8px;padding:7px 10px;cursor:pointer;font-size:15px}
+#log{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:12px;max-width:820px;width:100%;margin:0 auto}
+.msg{padding:11px 14px;border-radius:14px;max-width:86%;white-space:pre-wrap;word-wrap:break-word}
+.me{background:var(--me);align-self:flex-end;border-bottom-right-radius:4px}
+.bot{background:var(--bot);align-self:flex-start;border-bottom-left-radius:4px}
+.tool{color:var(--mut);font-style:italic}
+.hint{color:var(--mut);text-align:center;margin:auto}
+form{display:flex;gap:8px;padding:12px;background:var(--panel);border-top:1px solid #000;max-width:820px;width:100%;margin:0 auto}
+textarea{flex:1;resize:none;background:var(--bot);color:var(--tx);border:1px solid #3a3f4b;border-radius:10px;padding:11px;font:inherit;max-height:140px}
+button.send{background:var(--me);color:#fff;border:0;border-radius:10px;padding:0 18px;font-size:16px;cursor:pointer}button:disabled{opacity:.5}
+</style></head><body>
+<header><b>🏠 Home Assistant</b><select id="model"></select><button id="rb" title="Restart the box">⏻ Restart</button></header>
+<div id="log"><div class="hint">Pick a model and say hello 👋 (I can search the web and upgrade myself)</div></div>
+<form id="f"><textarea id="in" rows="1" placeholder="Message… (Enter to send)"></textarea><button class="send" id="send">Send</button></form>
+<script>
+const log=document.getElementById("log"),sel=document.getElementById("model"),inp=document.getElementById("in"),f=document.getElementById("f"),btn=document.getElementById("send"),rb=document.getElementById("rb");
+let msgs=[];
+function nice(n){return n.replace(/^hf\.co\/.*\//,"").replace(/-GGUF.*/,"").replace(/:.*/,"").replace(/-/g," ")}
+async function loadModels(){
+  try{const[d,def]=await Promise.all([fetch("/api/tags").then(r=>r.json()),fetch("/default").then(r=>r.json()).catch(()=>({}))]);
+    sel.innerHTML="";(d.models||[]).sort((a,b)=>a.name.localeCompare(b.name)).forEach(m=>{const o=document.createElement("option");o.value=m.name;o.textContent=nice(m.name);sel.appendChild(o)});
+    const want=(def.default||"");const pick=[...sel.options].find(o=>o.value===want)||[...sel.options].find(o=>/gemma/i.test(o.value));if(pick)sel.value=pick.value;
+  }catch(e){sel.innerHTML="<option>(offline)</option>"}
+}
+function add(cls,t){const d=document.createElement("div");d.className="msg "+cls;d.textContent=t;log.appendChild(d);log.scrollTop=log.scrollHeight;return d}
+rb.onclick=async()=>{if(!confirm("Restart the box? It will be back in about a minute."))return;rb.disabled=true;rb.textContent="Restarting…";
+  try{await fetch("/reboot",{method:"POST"})}catch(e){}
+  add("bot","🔄 Restarting now — reload this page in about a minute.");};
+f.onsubmit=async e=>{e.preventDefault();const text=inp.value.trim();if(!text||btn.disabled)return;
+  const hint=log.querySelector(".hint");if(hint)hint.remove();
+  add("me",text);msgs.push({role:"user",content:text});inp.value="";inp.style.height="auto";btn.disabled=true;
+  const out=add("bot","…");out.classList.add("tool");
+  try{const r=await fetch("/agent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:sel.value,messages:msgs})});
+    const rd=r.body.getReader(),dec=new TextDecoder();let buf="";
+    while(true){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});
+      let i;while((i=buf.indexOf("\n"))>=0){const line=buf.slice(0,i);buf=buf.slice(i+1);if(!line.trim())continue;
+        let ev;try{ev=JSON.parse(line)}catch(_){continue}
+        if(ev.type==="tool"){out.classList.add("tool");const lbl={web_search:"🔍 Searching",pull_model:"⬇ "+(ev.status||"Installing"),get_recommendations:"📋 Checking models",set_default:"⭐ Setting default",reboot_system:"🔄 Restarting"}[ev.name]||("⚙ "+ev.name);out.textContent=ev.status?lbl:(lbl+"…");log.scrollTop=log.scrollHeight}
+        else if(ev.type==="final"){out.classList.remove("tool");out.textContent=ev.content||"(no response)";msgs.push({role:"assistant",content:ev.content||""});loadModels();log.scrollTop=log.scrollHeight}}}
+  }catch(e){out.classList.remove("tool");out.textContent="⚠️ Error: "+e.message}
+  btn.disabled=false;inp.focus();
+};
+inp.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();f.requestSubmit()}});
+inp.addEventListener("input",()=>{inp.style.height="auto";inp.style.height=inp.scrollHeight+"px"});
+loadModels();
+</script></body></html>

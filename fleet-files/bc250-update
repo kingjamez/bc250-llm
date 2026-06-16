@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -uo pipefail
+. /etc/bc250/update.conf 2>/dev/null || true
+BASE_URL="${BASE_URL:-https://jaamcp.com/bc250}"
+SIGNERS=/etc/bc250/allowed_signers; VERFILE=/etc/bc250/version; NS=bc250; ID=bc250@jaamcp.com
+log(){ logger -t bc250-update "$*"; }
+grep -qE "^[^#]*ssh-ed25519" "$SIGNERS" 2>/dev/null || { log "update key not configured; skipping"; exit 0; }
+WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+cur=$(cat "$VERFILE" 2>/dev/null || echo 0)
+curl -fsSL --max-time 30 "$BASE_URL/update.json"     -o "$WORK/m.json" || { log "manifest fetch failed"; exit 0; }
+curl -fsSL --max-time 30 "$BASE_URL/update.json.sig" -o "$WORK/m.sig"  || { log "sig fetch failed"; exit 0; }
+ssh-keygen -Y verify -f "$SIGNERS" -I "$ID" -n "$NS" -s "$WORK/m.sig" < "$WORK/m.json" >/dev/null 2>&1 \
+  || { log "MANIFEST SIGNATURE INVALID — aborting"; exit 1; }
+ver=$(python3 -c "import json;print(int(json.load(open('$WORK/m.json')).get('version',0)))" 2>/dev/null || echo 0)
+[ "$ver" -le "$cur" ] && { log "up to date (v$cur)"; exit 0; }
+url=$(python3 -c "import json;print(json.load(open('$WORK/m.json')).get('payload_url',''))")
+sha=$(python3 -c "import json;print(json.load(open('$WORK/m.json')).get('payload_sha256',''))")
+[ -z "$url" ] && { echo "$ver" >"$VERFILE"; log "v$ver no-op; recorded"; exit 0; }
+log "update v$cur -> v$ver"
+curl -fsSL --max-time 600 "$url" -o "$WORK/p.tgz" || { log "payload fetch failed"; exit 1; }
+echo "$sha  $WORK/p.tgz" | sha256sum -c - >/dev/null 2>&1 || { log "payload checksum MISMATCH — aborting"; exit 1; }
+mkdir -p "$WORK/x" && tar -C "$WORK/x" -xzf "$WORK/p.tgz" || { log "extract failed"; exit 1; }
+[ -x "$WORK/x/apply.sh" ] || { log "payload missing apply.sh — aborting"; exit 1; }
+( cd "$WORK/x" && ./apply.sh ) && { echo "$ver" >"$VERFILE"; log "applied v$ver"; } || log "apply.sh FAILED (still v$cur)"
