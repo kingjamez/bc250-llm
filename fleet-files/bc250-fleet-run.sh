@@ -34,8 +34,8 @@ modprobe sp5100_tco 2>/dev/null || true
 echo "[*] Phase 1 — identify + CU map (safe) ..."
 python3 "$SUITE/characterize.py" || true
 
-echo "[*] Phase 2 — undervolt floor-hunt (resume-aware; may hang+reboot at the floor) ..."
-python3 "$SUITE/floorhunt.py" || true
+echo "[*] Phase 2 — silicon RANK (cool bursts; cooling-independent; resume-aware) ..."
+python3 "$SUITE/floorhunt.py" --rank || true
 
 banner "RESULT"
 python3 - "$SUITE" <<'PY'
@@ -58,18 +58,21 @@ for p in sorted(glob.glob("/sys/class/net/*")):
 best.sort(reverse=True)
 mac = best[0][1] if best else None
 b = boards.get(mac, {})
-d = b.get("die", {}); u = b.get("undervolt") or {}
-print("  MAC        : %s" % mac)
-print("  die        : %-9s  max-safe CUs: %s/40" % (d.get("type","?"), d.get("max_safe_cus","?")))
-print("  CU mask    : %s" % " ".join("%s=%s" % kv for kv in sorted(d.get("safe_cu_mask",{}).items())))
-if u.get("status") == "complete":
-    print("  undervolt  : 2000MHz @ %smV  (floor %s / stable %s, +%smV)  validated=%s"
+d = b.get("die", {}); u = b.get("undervolt") or {}; r = b.get("rank") or {}
+print("  MAC         : %s" % mac)
+print("  die         : %-9s  max-safe CUs: %s/40" % (d.get("type","?"), d.get("max_safe_cus","?")))
+print("  CU mask     : %s" % " ".join("%s=%s" % kv for kv in sorted(d.get("safe_cu_mask",{}).items())))
+if r.get("silicon_rank_mv"):
+    print("  SILICON RANK: cold-floor %smV @2000   native vddgfx %smV@%sMHz   (LOWER = better silicon)"
+          % (r.get("silicon_rank_mv"), r.get("native_vddgfx_mv"), r.get("native_vddgfx_clk_mhz")))
+    print("  STATUS      : RANKED  (full floor-hunt on a cooled board gives the production mV)")
+elif u.get("status") == "complete":
+    print("  undervolt   : 2000MHz @ %smV (floor %s/stable %s, +%smV) validated=%s"
           % (u.get("final_mv"), u.get("crash_floor_mv"), u.get("last_stable_mv"),
              u.get("margin_mv"), u.get("validated")))
-    print("  STATUS     : COMPLETE")
+    print("  STATUS      : COMPLETE (production undervolt)")
 else:
-    print("  undervolt  : %s" % (u.get("status") or "PENDING"))
-    print("  STATUS     : INCOMPLETE — re-run / check logs")
+    print("  STATUS      : INCOMPLETE — re-run / check logs")
 PY
 
 banner "DONE — SAFE TO POWER OFF.  MOVE THE DRIVE TO THE NEXT BOARD."
