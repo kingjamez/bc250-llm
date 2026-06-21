@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """bc250-fleet-characterize.py — BC-250 fleet characterization suite.
 
-Phase 1 (this file): SAFE characterization only — no GPU load, no risk.
+Phase 1 (this file): fast certification — read-only CU map + a brief silicon grade.
   - identifies the board by primary NIC MAC (the table key)
   - collects system info (BIOS, UMA/VRAM, GTT, CPU, RAM, kernel)
   - reads the die harvest (libdrm) -> clean/defective, defective WGP pairs,
     the max-safe CU mask, and max-safe CU count
+  - SILICON GRADE: a brief (~6s) light load reads native vddgfx (AVFS) -> a
+    cooling-independent silicon-quality score (LOWER mV = better chip). Skip
+    with --no-grade for a pure read-only run.
   - merges the result into /var/lib/bc250-fleet/boards.json keyed by MAC
 
 Phases 2 (undervolt floor-hunt) and 3 (thermal) plug into the same record/store.
 Run as root (libdrm render node + dmidecode).
 """
-import ctypes, struct, os, json, subprocess, glob, datetime, argparse
+import ctypes, struct, os, json, subprocess, glob, datetime, argparse, time, re
 
 STORE = "/var/lib/bc250-fleet/boards.json"
 AMDGPU_INFO_DEV_INFO = 0x16   # amdgpu_query_info: device info struct (has cu_bitmap)
@@ -143,6 +146,47 @@ def system_info(gpu):
     return info
 
 
+def hwmon_dir(gpu):
+    for h in sorted(glob.glob((gpu or "") + "/hwmon/hwmon*")):
+        return h
+    return None
+
+
+def read_silicon_grade(gpu, stress="/opt/bc250-fleet/stress.sh"):
+    """Brief light load (governor off, kernel auto-DPM) -> native vddgfx (AVFS).
+    LOWER mV = better silicon. Cooling-independent. Returns a dict or None. ~6-12s.
+    The clock is recorded too — only compare grades taken at the same clock."""
+    hw = hwmon_dir(gpu)
+    if not hw or not gpu:
+        return None
+    sh("systemctl stop cyan-skillfish-governor-smu 2>/dev/null")       # read NATIVE voltage
+    sh("sh -c 'echo auto > %s/power_dpm_force_performance_level' 2>/dev/null" % gpu)
+    samples = []
+    if os.path.exists(stress):
+        proc = subprocess.Popen(["bash", stress, "--duration", "6"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t0 = time.time()
+        while proc.poll() is None and time.time() - t0 < 16:
+            try:
+                cur = open(gpu + "/pp_dpm_sclk").read()
+            except OSError:
+                cur = ""
+            m = re.search(r"(\d+)Mhz\s*\*", cur)
+            mv = _rd_int(hw + "/in0_input")
+            if mv:
+                samples.append((mv, int(m.group(1)) if m else 0))
+            time.sleep(1)
+        try:
+            proc.wait(timeout=8)
+        except Exception:
+            proc.kill()
+    if not samples:
+        mv = _rd_int(hw + "/in0_input")                                # fallback: idle read
+        return {"vddgfx_mv": mv, "vddgfx_clk_mhz": None, "method": "idle"} if mv else None
+    mv, clk = max(samples, key=lambda s: s[1])                         # value at highest clock
+    return {"vddgfx_mv": mv, "vddgfx_clk_mhz": clk, "method": "brief-load"}
+
+
 def load_store():
     try:
         return json.load(open(STORE))
@@ -163,6 +207,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--store", default=STORE)
     ap.add_argument("--print", action="store_true", help="just print this board's record")
+    ap.add_argument("--no-grade", action="store_true", dest="no_grade",
+                    help="skip the silicon-grade brief load (pure read-only)")
     args = ap.parse_args()
     STORE = args.store
 
@@ -186,6 +232,10 @@ def main():
     h = read_harvest()
     if h:
         rec["die"] = analyze_die(h)
+    if not args.no_grade:
+        g = read_silicon_grade(gpu)     # brief light load -> native vddgfx silicon grade
+        if g:
+            rec["grade"] = g
     rec.setdefault("undervolt", None)   # Phase 2 fills
     rec.setdefault("thermal", None)     # Phase 3 fills
     rec.setdefault("status", "cu_mapped")
@@ -198,6 +248,10 @@ def main():
     print("  BIOS %s (%s)  kernel %s  RAM %sMB" %
           (s.get("bios_version"), s.get("bios_date"), s.get("kernel"), s.get("ram_mb")))
     print("  VRAM %sMB  GTT %sMB" % (s.get("vram_mb"), s.get("gtt_mb")))
+    if (s.get("vram_mb") or 0) > 2048:
+        print("  !! UMA WARNING: VRAM carveout %sMB >> 512MB spec — BIOS UMA not set to 512M."
+              % s.get("vram_mb"))
+        print("     Fix: Integrated Graphics=Forces / UMA Mode=UMA_SPECIFIED / 512MB, then CLEAR CMOS.")
     if d:
         print("  die: %s   max-safe CUs: %d/40" % (d.get("type"), d.get("max_safe_cus", 0)))
         for line in d.get("harvest", []):
@@ -206,6 +260,10 @@ def main():
             print("  defective: " + ", ".join(d["defective_pairs"]))
         print("  safe mask: " + " ".join("%s=%s" % (k, v)
               for k, v in sorted(d.get("safe_cu_mask", {}).items())))
+    g = rec.get("grade")
+    if g:
+        print("  silicon grade: vddgfx %smV @ %sMHz (%s)  — LOWER = better silicon" %
+              (g.get("vddgfx_mv"), g.get("vddgfx_clk_mhz"), g.get("method")))
     print("  status: %s   stored -> %s" % (rec["status"], STORE))
 
 
